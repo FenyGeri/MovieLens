@@ -1,0 +1,684 @@
+---
+title: "Capstone Exam: The MovieLens project"
+author: "Gergely Fenyvesi"
+date: "3/31/2020"
+output: pdf_document
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+ Creating recommendation systems is a typical machine learning exercice. In October 2006, Netflix offered a challenge to the data science community: improve their recommendation algorithm by 10% and win a million dollars.
+ The Netflix data is not publicly available, but the GroupLens research lab [(Grouplens)](https://grouplens.org) generated their own database with over 20 million ratings for over 27,000 movies by more than 138,000 users. We use a subset of this data for our Capstone Exam.
+ The exercice is the following: split the movielens data to a training (data.frame:edx) and a validation (data.frame:validation) set. Train an algorithm on the edx dataset and achieve the smallest possible RMSE (Residual Mean Squared Error) when you predict the given rating by each user in the validation set. The validation set must not be used under any circumstance for training.
+
+## Dataset creation
+ The following code will create the edx and validation datasets. For data exploration I kept the whole movielens dataset as well.
+
+```{r dataset_creation_show, eval=FALSE}
+###################################################################################
+# Create edx set, validation set + keep whole movielens set for data exploration
+###################################################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+#we remove unnecessary data
+rm(dl, ratings, movies, test_index, temp, removed)
+
+```
+
+
+```{r dataset_creation, message=FALSE, echo=FALSE, warning=FALSE}
+###################################################################################
+# Create edx set, validation set + keep whole movielens set for data exploration
+###################################################################################
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+#we remove unnecessary data
+rm(dl, ratings, movies, test_index, temp, removed)
+
+```
+
+\pagebreak
+
+# Methods
+
+To determine the proper method to use, I started to explore the whole MovieLens dataset, by:
+
+ 1. Exploring the structure of the dataset
+ 2. Transforming the structure of the dataset:
+   * Extract the production year of the film from the title
+   * Transform the timestamp of the rating given to a conventional date format
+ 3. Exploring the ratings given by films and by users
+ 
+## MovieLens dataset
+
+```{r step1, message=FALSE, echo=FALSE}
+library(lubridate)
+str(movielens)
+summary(movielens)
+rating_nr <- dim(movielens)[1] %>% format(nsmall=1,  big.mark=",")
+movie_nr  <- movielens %>% select(movieId) %>% distinct() %>% summarise(n=n()) %>% format(nsmall=1,  big.mark=",")
+user_nr  <- movielens %>% select(userId) %>% distinct() %>% summarise(n=n()) %>% format(nsmall=1,  big.mark=",")
+#we can extract it and add a column prodyear
+movielens <- movielens %>% mutate(prodyear=str_sub(title, str_length(title)-4,str_length(title)-1))
+#films were produced between the following years
+from_year <- range(movielens$prodyear)[1]
+to_year <- range(movielens$prodyear)[2]
+#we can transform the rate timestamp to date
+movielens <- movielens %>% mutate(rate_date=as_datetime(timestamp))
+#ratings were given between the following dates
+from_year_rat <- range(movielens$rate_date)[1]
+to_year_rat <- range(movielens$rate_date)[2]
+```
+The MovieLens dataset contains `r rating_nr` ratings given by `r user_nr` users, including `r movie_nr` films, produced between 
+`r from_year` and `r to_year`. The most rated films are not the most recent ones, but from the mid-90s, which are recent enough to be popular and users had enough time to rate:
+
+```{r step2, echo=FALSE, message=FALSE}
+movielens %>% group_by(prodyear) %>% summarise(n=n()) %>% arrange(desc(n)) %>% slice(1:10) %>% knitr::kable()
+movielens %>% ggplot(aes(as.numeric(prodyear))) + geom_bar() + scale_x_continuous("Production year") + 
+  scale_y_continuous("Number of ratings") + ggtitle("Number of ratings vs production year of films") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Ratings were given between `r from_year_rat` and `r to_year_rat`. The number of rating per year is not constant:
+
+
+```{r step3, echo=FALSE, message=FALSE}
+movielens %>% mutate(rate_year=year(as.Date(rate_date))) %>% 
+  ggplot(aes(rate_year)) + geom_histogram() + scale_x_continuous("Rating year") + 
+  scale_y_continuous("Number of ratings") + ggtitle("Number of ratings per year") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Ratings per year:
+
+```{r step4, echo=FALSE, message=FALSE}
+movielens %>% mutate(rate_year=year(as.Date(rate_date))) %>% group_by(rate_year) %>% 
+  summarise(n=n()) %>% arrange(desc(n)) %>% knitr::kable()
+
+rapport <- movielens %>% mutate(rate_year=year(as.Date(rate_date))) %>% group_by(rate_year) %>% 
+  summarise(n=n()) %>% filter(rate_year>1995 & rate_year<2009) %>%
+  summarise(rapport=max(n)/(min(n)))
+rapport <- sprintf("%1.f%%", 100*round(rapport))
+```
+
+If we exclude the beginning and ending year, the two outliers, we still see more than `r rapport` variation between the two extremes. An upward trend is observable:
+
+```{r step5, echo=FALSE, message=FALSE}
+movielens %>% mutate(rate_year=year(as.Date(rate_date))) %>% group_by(rate_year) %>% 
+  summarise(n=n()) %>% filter(rate_year>1995 & rate_year<2009) %>%
+  ggplot(aes(rate_year,n)) + geom_point() + geom_smooth(method = "lm", alpha=0.5, se=FALSE) + 
+  scale_x_continuous("Year of rating") + 
+  scale_y_continuous("Number of ratings received") + ggtitle("Number of ratings received per year (trend)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Ratings distribution
+
+```{r step6, echo=FALSE, message=FALSE}
+#function to get the mode of a distribution
+getmode <- function(v) {
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+#average, median and mode of movies' rating
+library(moments)
+m <- movielens %>% summarise(average=round(mean(rating),2),median=median(rating), mode=getmode(rating), stdev=sd(rating),
+                             skewness=skewness(rating), kurtosis=kurtosis(rating))
+```
+
+The median rating of `r m$median` is higher than the average rating of `r m$average`. It means a negative skew, that we can verify by computing the 2nd, 3rd and 4th moments (stdev, skewnes and kurtosis) of the distribution (for a standard normal distriubution the average is 0, the standard deviation equals to 1, with a skewness of 0 and kurtosis of 3):
+
+* stdev = `r m$stdev`
+* skewness = `r m$skewness`
+* kurtosis = `r m$kurtosis`
+
+\pagebreak
+
+The empirical distribution is multimodal as half ratings are rare:
+
+```{r step7, echo=FALSE, message=FALSE, out.width="80%", out.height="80%"}
+movielens %>% ggplot(aes(rating)) + geom_histogram(bins = 10) + 
+  scale_x_continuous("Rating") + 
+  scale_y_continuous("Number of ratings received") + ggtitle("Distribution of ratings") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+If we round ratings we can see that the distribution is skewed and unimodal, with a mode of 4:
+
+```{r step8, echo=FALSE, message=FALSE, out.width="80%", out.height="80%"}
+movielens %>% mutate(rating=round(rating)) %>% ggplot(aes(rating)) + geom_histogram(bins = 5) + 
+  scale_x_continuous("Rating") + 
+  scale_y_continuous("Number of ratings received") + ggtitle("Distribution of ratings (round to integer)") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+\pagebreak
+
+### Ratings per film  (the film effect)
+
+#### Number of ratings
+
+Most films received a small number of ratings:
+
+```{r step9, echo=FALSE, message=FALSE, out.width="80%", out.height="80%"}
+movielens %>% group_by(movieId) %>% summarise(n=n()) %>% ggplot(aes(n)) + geom_histogram(bins=50) + 
+  scale_x_continuous("Number of ratings received") + 
+  scale_y_continuous("Number of films") + ggtitle("Distribution of number of ratings per film") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+It is easier to visualise the distribution on a log scale:
+
+```{r step10, echo=FALSE, message=FALSE, out.width="80%", out.height="80%"}
+movielens %>% group_by(movieId) %>% summarise(n=n()) %>% 
+  ggplot(aes(n)) + geom_histogram(bins=200) + 
+  scale_y_continuous("Number of films") + ggtitle("Distribution of number of ratings per film") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_x_log10("Number of ratings received")
+```
+
+A couple of blockbusters received a really large number of ratings:
+
+```{r step11, echo=FALSE, message=FALSE}
+titles <- movielens %>% select(movieId,title) %>% distinct()
+movielens %>% group_by(movieId) %>% summarise(n=n()) %>% arrange(desc(n)) %>% slice(1:10) %>% left_join(titles, by='movieId') %>%
+  select(title,n)  %>% knitr::kable()
+```
+
+While most films received a number of ratings of only one digits:
+
+```{r step12, echo=FALSE, message=FALSE}
+movielens %>% group_by(movieId) %>% summarise(number_of_ratings=n()) %>% 
+  group_by(number_of_ratings) %>% summarise(number_of_films=n()) %>% arrange(desc(number_of_films)) %>% 
+  slice(1:10)  %>% knitr::kable()
+```
+
+#### Average ratings per film
+
+When we try to search for best and worst rated films, it is important to look at the number of ratings as well. The best rated films are the following ones:
+
+```{r step13, echo=FALSE, message=FALSE}
+movielens %>% group_by(movieId) %>% summarise(mean_rating=mean(rating),  number_rating=n()) %>% arrange(desc(mean_rating)) %>%
+  slice(1:10) %>% left_join(titles,by='movieId') %>% select(title, mean_rating, number_rating) %>% knitr::kable()
+```
+
+We can doubt well that the Hungarian Satantango is the best rated film. These films are art movies rated by just a couple of users, the rating is strongly biaised. We should select a minimum threshold. Let's try with n=20, the best films in this case are:
+
+```{r step14, echo=FALSE, message=FALSE}
+movielens %>% group_by(movieId) %>% summarise(mean_rating=mean(rating),  number_rating=n()) %>% 
+  filter(number_rating>=20) %>% arrange(desc(mean_rating)) %>%
+  slice(1:10) %>% left_join(titles,by='movieId') %>% select(title, mean_rating, number_rating)  %>% knitr::kable()
+```
+
+Now this is much more realistic. We can observe the same effect for worst film ratings. The lowest averages are given to not well known films by just one or two users:
+
+```{r step15, echo=FALSE, message=FALSE}
+movielens %>% group_by(movieId) %>% summarise(mean_rating=mean(rating),  number_rating=n()) %>% arrange(mean_rating) %>%
+  slice(1:10) %>% left_join(titles,by='movieId') %>% select(title, mean_rating, number_rating)  %>% knitr::kable()
+```
+
+Applying the same threshold of n=20 we exclude the outliers for the worst ratinngs as well:
+
+```{r step16, echo=FALSE, message=FALSE}
+movielens %>% group_by(movieId) %>% summarise(mean_rating=mean(rating),  number_rating=n()) %>% 
+  filter(number_rating>=20) %>% arrange(mean_rating) %>%
+  slice(1:10) %>% left_join(titles,by='movieId') %>% select(title, mean_rating, number_rating)  %>% knitr::kable()
+```
+
+When we create our model, we should take the number of ratings into account, using a **degressive weight for smaller number of ratings. This should normalize the film effect**. We can observe however that under average rated films received a smaller number of ratings: this could be taken to account. For negative film effects, the wheight applied should change more rapidly.
+
+\pagebreak
+
+### Ratings per user  (the user effect)
+
+A couple of users were really active, they rated a large number of films:
+
+```{r step17, echo=FALSE, message=FALSE}
+movielens %>% group_by(userId) %>% summarise(n=n()) %>% arrange(desc(n)) %>% slice(1:10) %>% knitr::kable()
+```
+
+While others gave only a couple of ratings, most users rating about 20 films:
+
+```{r step18, echo=FALSE, message=FALSE}
+movielens %>% group_by(userId) %>% summarise(number_of_ratings=n()) %>% group_by(number_of_ratings) %>% 
+  summarise(number_of_users=n()) %>% arrange(desc(number_of_users)) %>% 
+  slice(1:10)  %>% knitr::kable()
+
+movielens %>% group_by(userId) %>% summarise(number_of_ratings=n()) %>% group_by(number_of_ratings) %>% 
+  summarise(number_of_users=n()) %>% ggplot(aes(number_of_ratings, number_of_users)) + geom_point() +
+  scale_x_continuous("Number of ratings") + 
+  scale_y_continuous("Number of users") + ggtitle("Number of rating per user") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Some users tend to give better ratings then others, while some users are more kinky with their ratings:
+
+```{r step19, echo=FALSE, message=FALSE, out.width="80%", out.height="80%"}
+rating_by_user <- movielens %>% group_by(userId) %>% summarise(avg_rating=mean(rating)) 
+rating_by_user %>% ggplot(aes(avg_rating)) + geom_histogram(colour = "black", 
+                                                            fill = "white") 
+```
+
+This distribution seems quite normal. We can verify it visually by drawing a normal density on the same graph:
+
+```{r step20, echo=FALSE, message=FALSE, out.width="80%", out.height="80%"}
+rating_by_user %>% ggplot(aes(x=avg_rating)) + geom_histogram(aes(y=..density..),color="black", fill="lightblue")+
+  stat_function(fun = dnorm, args = list(mean = mean(rating_by_user$avg_rating), sd = sd(rating_by_user$avg_rating)),color="red")
+```
+
+People tend to give on average more average or slightly better than average ratings, kinky users (ratings about 2 - 2.5) are also more common then a normal distribution would suggest. The distribution seems negaively skewed and leptokurtic (kurtosis > 3).
+This can be easily verified:
+
+```{r step21, echo=FALSE, message=FALSE}
+rating_by_user %>% summarise(skewness=skewness(avg_rating), kurtosis=kurtosis(avg_rating)) %>% knitr::kable()
+```
+
+Let's examine whether users tend to become kinkier or softer with their ratings over time. We can visualize the ratings given by the two most active users over the sqrt of time in days:
+
+```{r step22, echo=FALSE, message=FALSE}
+#first we create the first rating date of each user
+first_ratings <- movielens %>% group_by(userId) %>% summarise(first_rating=min(rate_date)) 
+
+#then we create a rate_date_rel column (transform seconds to sqrt of days)
+movielens <- movielens %>% left_join(first_ratings, by = "userId") %>% mutate(rate_date_rel=(as.numeric(rate_date-first_rating))/(60*60*24)) %>% 
+  mutate(rate_date_rel=sqrt(rate_date_rel))
+
+#let's examine the two most active users:
+#userId=59269
+df <- movielens %>% filter(userId=="59269")
+fit <- loess(rating ~ rate_date_rel, degree=1, span = 0.5, data=df)
+df <- df %>% mutate(smooth = fit$fitted) 
+
+df2 <- movielens %>% filter(userId=="67385")
+fit2 <- loess(rating ~ rate_date_rel, degree=1, span = 0.5, data=df2)
+df2 <- df2 %>% mutate(smooth = fit2$fitted) 
+
+rbind(df,df2) %>% ggplot(aes(rate_date_rel,smooth)) + geom_line(color="blue") +
+  facet_grid(. ~ userId) + 
+  scale_x_continuous("Time to first rating") + 
+  scale_y_continuous("Average rating given") + ggtitle("Average rating in time for the two most active users") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+It seems that the **user effect in ratings is time dependent**. Users tend to change their given average ratings over time, so the user bias can be **modeled as a function of time: _u(t)_**.
+
+### Ratings per genre  (the genre effect)
+
+A possible genre effect can be included as well, but to treat **with caution as films can have more than one genre**.
+
+```{r step23, echo=FALSE, message=FALSE}
+#we create a list of distinct film genres
+l_genres <- movielens %>% select(genres) %>% distinct() %>% as.list() 
+l_genres <- sapply(transpose(l_genres),function(x){
+  transpose(str_split(x,"\\|"))
+})
+l_genres <- unlist(l_genres)
+l_genres <- as.data.frame(l_genres) %>% distinct()
+l_genres <- data.frame(lapply(l_genres,as.character),stringsAsFactors = FALSE)
+
+#then we can get the average rating of each genre + number of ratings
+genres_rat <- sapply(unlist(l_genres),function(x){
+  movielens %>% filter(str_detect(genres,x)) %>% summarise(avg=mean(rating))
+})
+genres_nr <- sapply(unlist(l_genres),function(x){
+  movielens %>% filter(str_detect(genres,x)) %>% summarise(n=n())
+})
+df <- data.frame(cbind(l_genres,rating=unlist(genres_rat),n=unlist(genres_nr))) %>%
+  mutate(genres=l_genres) %>% select(genres,rating,n)
+
+#it is to treat with caution as one film can have more than one genre
+#We can see, genres with lower and higher number of ratings tend to have a better average rating
+df <- df %>% filter(genres!="(no genres listed)") 
+fit <- loess(rating ~ n, degree=1, span = 0.8, data=df)
+df %>% filter(genres!="(no genres listed)") %>% mutate(smooth = fit$fitted) %>% ggplot(aes(n,rating,color=genres)) + geom_point() +
+  geom_line(aes(n, smooth), color="red") +
+  scale_x_continuous("number of ratings") + scale_y_continuous("average rating")  + 
+  ggtitle("Average rating and number of ratings per genre" ) +
+  theme(plot.title = element_text(hjust = 0.5))
+  
+#we can also visualize the rating of each genre on a boxplot to see which genre has the most consistent rating 
+#and averages can also be compoared
+#create a dataframe df2 with the associated genres for each movie (tidy format)
+#empty df2
+df2 <- movielens %>% filter(genres=="toto") %>% mutate(gnr="toto")
+#append each genre to df
+for(i in 1:length(unlist(l_genres))){
+  df1 <- movielens %>% filter(str_detect(genres,unlist(l_genres)[i])) %>% mutate(gnr=unlist(l_genres)[i])
+  df2 <- rbind(df1,df2)
+}
+
+#create boxplot with mean showed
+df2 %>%
+  mutate(genre = reorder(gnr, rating, FUN = mean)) %>% ggplot(aes(genre,rating)) + geom_boxplot(fill="lightblue") + 
+  stat_summary(fun.y = mean, geom = "point", shape=20, size=8,color="red", fill="red") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + geom_hline(yintercept = mean(movielens$rating), color="blue", size=2) + 
+  ggtitle("Average rating per genre" ) +
+  theme(plot.title = element_text(hjust = 0.5))
+#a possible genre effect can be used but with caution as films have more than one genres
+#The boxplot shows for example that horror is rated on average lower than the average 3.5 of all films, 
+#but ratings are not consistent, some films are rated 0.5 while others were rated to 5
+#Science-Fiction received more consistent ratings, the box is smaller.
+```
+
+On the first graph above, we can clearly see, **genres with less ratings tend to be biaised upward**, while the **most popular genres are rated higher** as well. In the middle of the graph, we can observe a **regression to the mean**.
+
+On the second graph we see a boxplot. The blue line is the global average, while the red dots inside the boxes show the average rating of each genre. This graph shows for example that horror is rated on average lower than the average 3.5 of all films, but **ratings are not consistent**, some films are rated 0.5 while others received a 5. Science-Fiction received more consistent ratings, the box is smaller.
+
+## The EDX and validation datasets
+
+The EDX and validation datasets have the same structure as the MovieLens dataset. To create them we splitted randomly the MovieLens dataset keeping 90% of the lines in the EDX dataset and making sure that all the user and movie identifiers present in the validation set are also present in the EDX dataset.
+
+```{r step23b, echo=FALSE, message=FALSE}
+str(edx)
+summary(edx)
+str(validation)
+summary(validation)
+```
+
+## The model used 
+
+For our prevision I used a model with **regularization: the average rating is the starting point** that I rectifed with a **regularized user and movie effect. Lambda is the shrinkage factor**: for simplicity the same factor was used for the user and the movie effect.
+
+To determine lambda, I executed a **10-fold cross validation on the edx dataset**: I created 10 sets of randomly selected values equivalent of 10% of lines from the dataset and used for optimization of lambda. The lambda resulting the smallest RMSE was selected, then the average was taken as the final lambda to use and the resulting RMSE of the training set.
+
+The final RMSE was computed on the validation set, then it was compared to the RMSE obtained during training. If the two RMSEs were close, then we could not speak about overtraining of our algorithm and we could accept results.
+
+To keep results the same at each execution, I chose to set the seed to 1 when training the algorithm for lambda.
+
+For evaluation of results, we will compute the RMSE the following way:
+
+```{r step24 }
+#for final validation we sill use the RMSE (Residual Means Squares Errors)
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+\pagebreak
+
+# Results
+
+## Cross-validation to determine lambda
+
+As a first step I executed a 10-fold cross validation on the edx training set to determine the optimal shrinkage factor, lambda:
+
+```{r cross_validation, eval=FALSE}
+#We will use a model with regularized movie + user effect (lambda is a degressive regularization factor)
+#We can use 10_fold cross validation without the validation set to determine the optimal lambda that minimizes RMSE
+#We set the seed to receive a stable result
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = edx$rating, times = 10, p = 0.1, list = FALSE)
+results <- sapply(seq(1,10),function(i){
+  
+  train_set <- edx[-test_index[,i],]
+  temp <- edx[test_index[,i],]
+  
+  # Make sure userId and movieId in validation set are also in edx set
+  test_set <- temp %>% 
+    semi_join(train_set, by = "movieId") %>%
+    semi_join(train_set, by = "userId")
+  
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(temp, test_set)
+  train_set <- rbind(train_set, removed)
+  
+  lambdas <- seq(0, 10, 0.25)
+  
+  rmses <- sapply(lambdas, function(l){
+    
+    mu <- mean(train_set$rating)
+    
+    b_i <- train_set %>% 
+      group_by(movieId) %>%
+      summarize(b_i = sum(rating - mu)/(n()+l))
+    
+    b_u <- train_set %>% 
+      left_join(b_i, by="movieId") %>%
+      group_by(userId) %>%
+      summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+    
+    predicted_ratings <- 
+      test_set %>% 
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      mutate(pred = mu + b_i + b_u) %>%
+      pull(pred)
+    
+    return(RMSE(predicted_ratings, test_set$rating))
+  })
+  
+  return(c(lambdas[which.min(rmses)],min(rmses)))
+})
+
+#results: the lambda to use will be the average lambda of the 10 sets 
+#and the average RMSE needs to be compared with the RMSE of the validation set to see whether we overtrained
+results
+mean(results[1,]) #this is the lambda to use: 4.775
+mean(results[2,]) #this is the average RMSE on the training set: 0.8649748
+lambda <- mean(results[1,])
+```
+
+```{r cross_validation_exec, echo=FALSE, message=FALSE, warning=FALSE}
+#We will use a model with regularized movie + user effect (lambda is a degressive regularization factor)
+#We can use 10_fold cross validation without the validation set to determine the optimal lambda that minimizes RMSE
+#We set the seed to receive a stable result
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = edx$rating, times = 10, p = 0.1, list = FALSE)
+results <- sapply(seq(1,10),function(i){
+  
+  train_set <- edx[-test_index[,i],]
+  temp <- edx[test_index[,i],]
+  
+  # Make sure userId and movieId in validation set are also in edx set
+  test_set <- temp %>% 
+    semi_join(train_set, by = "movieId") %>%
+    semi_join(train_set, by = "userId")
+  
+  # Add rows removed from validation set back into edx set
+  removed <- anti_join(temp, test_set)
+  train_set <- rbind(train_set, removed)
+  
+  lambdas <- seq(0, 10, 0.25)
+  
+  rmses <- sapply(lambdas, function(l){
+    
+    mu <- mean(train_set$rating)
+    
+    b_i <- train_set %>% 
+      group_by(movieId) %>%
+      summarize(b_i = sum(rating - mu)/(n()+l))
+    
+    b_u <- train_set %>% 
+      left_join(b_i, by="movieId") %>%
+      group_by(userId) %>%
+      summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+    
+    predicted_ratings <- 
+      test_set %>% 
+      left_join(b_i, by = "movieId") %>%
+      left_join(b_u, by = "userId") %>%
+      mutate(pred = mu + b_i + b_u) %>%
+      pull(pred)
+    
+    return(RMSE(predicted_ratings, test_set$rating))
+  })
+  
+  return(c(lambdas[which.min(rmses)],min(rmses)))
+})
+
+#results: the lambda to use will be the average lambda of the 10 sets 
+#and the average RMSE needs to be compared with the RMSE of the validation set to see whether we overtrained
+rownames(results) <- c("Lambda", "RMSE")
+colnames(results) <- seq(1,10)
+t(results)
+mean(results[1,]) #this is the lambda to use: 4.775
+mean(results[2,]) #this is the average RMSE on the training set: 0.8649748
+
+```
+
+## Final RMSE
+
+As a last step the model was evaluated with the validation dataset to report the final RMSE:
+
+```{r final, eval=FALSE}
+lambda <- mean(results[1,])
+
+#global average
+mu <- mean(edx$rating)
+
+#penalized movie effect  
+b_i <- edx %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+lambda))
+
+#penalized user effect  
+b_u <- edx %>% 
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+
+#predicted ratings  
+predicted_ratings <- 
+  validation %>% 
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+#evaluation
+RMSE(predicted_ratings, validation$rating)
+```
+
+
+```{r final_exec, echo=FALSE, message=FALSE}
+lambda <- mean(results[1,])
+
+#global average
+mu <- mean(edx$rating)
+
+#penalized movie effect  
+b_i <- edx %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+lambda))
+
+#penalized user effect  
+b_u <- edx %>% 
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+
+#predicted ratings  
+predicted_ratings <- 
+  validation %>% 
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+#evaluation
+r_rmse <- RMSE(predicted_ratings, validation$rating)
+rmse_naive <- RMSE(mu, validation$rating)
+```
+
+With a lambda of `r lambda` we obtained the **final RMSE of `r r_rmse` on the validation dataset**.
+\pagebreak
+
+# Limitations
+
+The model I used is really simple but provides decent results. The final RMSE obtained means that on average we made an error of less than 1 when we predicted the rating of each user for the validation set. For comparison the RMSE obtained when predicting the average rating for each film is `r rmse_naive`.
+
+Possibilities for improvement are the following:
+
+ * instead of using a constant user effect, we can use a time dependent user effect
+ * use different shrinkage factor (lambda) for user and film effects, train them independently
+ * use different shrinkage factor (lambda) for over and under average rated films, train them independently
+ * use PCA and SVD to create user specific effects.
